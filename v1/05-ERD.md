@@ -8,55 +8,54 @@
 ---
 
 ## 1. ERD
-
 ```mermaid
 erDiagram
 
     MEMBER {
         bigint id PK
-        varchar email UK "NOT NULL"
-        varchar password "BCrypt 해시"
+        varchar email UK
+        varchar password
         varchar nickname
-        float average_rating "판매자 평점, 기본값 0.0"
+        float average_rating
         datetime created_at
         datetime updated_at
-        boolean is_deleted "소프트 삭제"
+        boolean is_deleted
     }
 
     CATEGORY {
         bigint id PK
-        bigint parent_id FK "NULL이면 대분류"
+        bigint parent_id FK
         varchar name
-        int depth "0=대분류, 1=소분류"
+        int depth
     }
 
     PRODUCT {
         bigint id PK
-        bigint seller_id FK "MEMBER.id"
-        bigint category_id FK "CATEGORY.id (소분류)"
-        varchar title "2~40자"
-        text description
+        bigint seller_id FK
+        bigint category_id FK
+        varchar title
+        varchar description
         int price
-        enum status "SALE|RESERVED|TRADING|SOLD|REVIEWED|DELETED — 판매글 공개 상태"
-        int like_count "비정규화 캐싱"
+        varchar status
+        int like_count
         datetime created_at
         datetime updated_at
-        boolean is_deleted "소프트 삭제"
+        boolean is_deleted
     }
 
     PRODUCT_IMAGE {
         bigint id PK
         bigint product_id FK
         varchar image_url
-        int sort_order "정렬 순서"
+        int sort_order
     }
 
     TRADE {
         bigint id PK
-        bigint product_id FK "PRODUCT.id — UK 없음. 취소 후 재거래 허용"
-        bigint buyer_id FK "MEMBER.id"
-        bigint seller_id FK "MEMBER.id"
-        enum status "RESERVED|TRADING|SOLD|REVIEWED|CANCELLED — 거래 진행 상태"
+        bigint product_id FK
+        bigint buyer_id FK
+        bigint seller_id FK
+        varchar status
         datetime reserved_at
         datetime traded_at
         datetime sold_at
@@ -65,11 +64,11 @@ erDiagram
 
     REVIEW {
         bigint id PK
-        bigint trade_id FK UK "거래당 1건"
-        bigint reviewer_id FK "구매자"
-        bigint reviewee_id FK "판매자"
-        int rating "1~5"
-        text content
+        bigint trade_id FK
+        bigint reviewer_id FK
+        bigint reviewee_id FK
+        int rating
+        varchar content
         datetime created_at
     }
 
@@ -82,10 +81,10 @@ erDiagram
 
     CHAT_ROOM {
         bigint id PK
-        bigint product_id FK "어떤 판매글에 대한 채팅인지"
-        bigint buyer_id FK "채팅 시작한 구매자"
-        bigint seller_id FK "판매자"
-        datetime created_at "채팅방 생성 = 구매자가 상품 상세에서 채팅하기 클릭 시"
+        bigint product_id FK
+        bigint buyer_id FK
+        bigint seller_id FK
+        datetime created_at
         datetime last_message_at
     }
 
@@ -93,7 +92,7 @@ erDiagram
         bigint id PK
         bigint chat_room_id FK
         bigint sender_id FK
-        text content
+        varchar content
         boolean is_read
         datetime created_at
     }
@@ -101,32 +100,37 @@ erDiagram
     KEYWORD_LOG {
         bigint id PK
         varchar keyword
-        int count "검색 횟수"
-        date log_date "일별 집계"
+        int count
+        date log_date
     }
 
-    MEMBER ||--o{ PRODUCT : "판매자"
-    MEMBER ||--o{ TRADE : "구매자"
-    MEMBER ||--o{ LIKE : "찜"
-    MEMBER ||--o{ REVIEW : "작성자(reviewer)"
-    MEMBER ||--o{ REVIEW : "대상자(reviewee)"
-    MEMBER ||--o{ CHAT_ROOM : "구매자"
-    MEMBER ||--o{ CHAT_ROOM : "판매자"
-    MEMBER ||--o{ CHAT_MESSAGE : "발신자"
+    MEMBER ||--o{ PRODUCT : sells
+    MEMBER ||--o{ TRADE : buys
+    MEMBER ||--o{ LIKE : likes
+    MEMBER ||--o{ REVIEW : writes
+    MEMBER ||--o{ REVIEW : receives
+    MEMBER ||--o{ CHAT_ROOM : buyer_rooms
+    MEMBER ||--o{ CHAT_ROOM : seller_rooms
+    MEMBER ||--o{ CHAT_MESSAGE : sends
 
-    CATEGORY ||--o{ CATEGORY : "parent(대분류)"
-    CATEGORY ||--o{ PRODUCT : "카테고리"
+    CATEGORY ||--o{ CATEGORY : parent_of
+    CATEGORY ||--o{ PRODUCT : classifies
 
-    PRODUCT ||--o{ PRODUCT_IMAGE : "이미지"
-    PRODUCT ||--o{ TRADE : "거래 (취소 후 재거래 허용 → 다건 가능)"
-    PRODUCT ||--o{ LIKE : "찜"
-    PRODUCT ||--o{ CHAT_ROOM : "채팅"
+    PRODUCT ||--o{ PRODUCT_IMAGE : has
+    PRODUCT ||--o{ TRADE : records
+    PRODUCT ||--o{ LIKE : receives
+    PRODUCT ||--o{ CHAT_ROOM : has
 
-    TRADE ||--o| REVIEW : "리뷰"
+    TRADE ||--o| REVIEW : has
 
-    CHAT_ROOM ||--o{ CHAT_MESSAGE : "메시지"
+    CHAT_ROOM ||--o{ CHAT_MESSAGE : contains
 ```
-
+- PRODUCT는 일반 커머스 상품 마스터가 아니라 중고 판매글(Listing) 개념이다.
+- PRODUCT.status는 판매글 공개 상태를 나타낸다.
+- TRADE.status는 거래 진행 상태를 나타낸다.
+- TRADE는 PRODUCT와 1:N 관계로 보며, 취소 후 재거래를 허용한다.
+- REVIEW는 거래당 1건만 허용한다.
+- CHAT_ROOM은 구매자가 상품 상세에서 채팅하기를 눌렀을 때 생성된다.
 ---
 
 ## 2. 설계 결정 사항

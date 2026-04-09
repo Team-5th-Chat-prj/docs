@@ -1,6 +1,6 @@
 # 06. API 명세서
 
-> **버전**: v1.1 (에러 응답 상세화, PRODUCT_IMAGE 정책 명시, 신규 에러 코드 추가)
+> **버전**: v1.2 (채팅방 생성 API 추가, 에러코드 통일, retryAfter 정책 명시)
 > **Base URL**: `https://api.marketplace.com/api/v1`
 > **인증**: `Authorization: Bearer {AccessToken}` (🔒 표시 API)
 
@@ -69,6 +69,7 @@
 
 | Method | URI | 설명 | 인증 |
 |--------|-----|------|------|
+| POST | `/chat-rooms` | 채팅방 생성 (이미 있으면 기존 반환) | 🔒 |
 | GET | `/chat-rooms` | 내 채팅방 목록 | 🔒 |
 | GET | `/chat-rooms/{chatRoomId}/messages` | 채팅 이력 조회 | 🔒 |
 
@@ -300,6 +301,40 @@
 
 ---
 
+### POST /chat-rooms (채팅방 생성)
+
+**Request Body**:
+```json
+{ "productId": 42 }
+```
+
+**처리 로직**:
+1. 동일 `(buyer_id, product_id)` 채팅방 존재 여부 조회
+2. 존재하면 → 기존 `chatRoomId` 반환 (멱등)
+3. 없으면 → CHAT_ROOM 생성 후 반환
+
+**Response 200** (기존 채팅방 존재):
+```json
+{ "chatRoomId": 55, "created": false }
+```
+
+**Response 201** (신규 채팅방 생성):
+```json
+{ "chatRoomId": 56, "created": true }
+```
+
+**Response 400** (본인 상품에 채팅 시도):
+```json
+{ "code": "SELF_CHAT", "message": "본인의 판매글에는 채팅을 시작할 수 없습니다." }
+```
+
+**Response 404** (상품 없음):
+```json
+{ "code": "PRODUCT_NOT_FOUND", "message": "존재하지 않는 상품입니다." }
+```
+
+---
+
 ### GET /search/popular
 
 **Response 200** (Caffeine 캐시, TTL 10분):
@@ -327,7 +362,7 @@
 | 400 | INVALID_REQUEST | 요청 값 유효성 오류 |
 | 400 | INVALID_STATUS_TRANSITION | 허용되지 않는 거래 상태 전이 |
 | 400 | SELF_RESERVATION | 본인 상품 예약 시도 |
-| 400 | DUPLICATE_RESERVATION | 동일 사용자 중복 예약 시도 |
+| 400 | SELF_CHAT | 본인 상품에 채팅 시도 |
 | 401 | UNAUTHORIZED | 인증 실패 / 토큰 만료 |
 | 401 | INVALID_CREDENTIALS | 이메일 또는 비밀번호 불일치 |
 | 403 | FORBIDDEN | 권한 없음 (타인 리소스 접근) |
@@ -336,9 +371,28 @@
 | 404 | PRODUCT_NOT_FOUND | 존재하지 않는 상품 |
 | 404 | TRADE_NOT_FOUND | 존재하지 않는 거래 |
 | 409 | DUPLICATE_EMAIL | 이메일 중복 |
-| 409 | ALREADY_RESERVED | 이미 예약된 상품 |
-| 409 | LOCK_TIMEOUT | 락 대기 타임아웃 (잠시 후 재시도 안내) |
+| 409 | ALREADY_RESERVED | 이미 예약된 상품 (동시 요청 포함, 중복 클릭 포함) |
+| 409 | LOCK_TIMEOUT | DB 락 대기 타임아웃 — 잠시 후 재시도 안내 |
 | 500 | INTERNAL_ERROR | 서버 오류 |
+
+> **에러코드 통일 이유**: `DUPLICATE_RESERVATION`과 `ALREADY_RESERVED`는 동일한 상황(이미 예약된 상품)을 가리키므로 `ALREADY_RESERVED`로 단일화한다. 중복 클릭, 동시 요청, 타인 선점 모두 이 코드를 사용한다.
+
+### retryAfter 정책
+
+`ALREADY_RESERVED` 응답에는 `retryAfter` 힌트를 포함한다.
+
+```json
+{
+  "code": "ALREADY_RESERVED",
+  "message": "이미 예약된 상품입니다. 잠시 후 상태를 다시 확인해보세요.",
+  "retryAfter": 1
+}
+```
+
+- `retryAfter: 1` = 1초 후 상품 상세 재조회 권장
+- 클라이언트는 이 값을 보고 1초 후 `GET /products/{id}`를 호출해 현재 status를 확인
+- 예약 취소로 인해 다시 SALE이 됐다면 예약 버튼을 재활성화
+- 이 방식은 서버 Push 없이 단순 폴링으로 상태 동기화를 달성하는 최소 구현
 
 ---
 

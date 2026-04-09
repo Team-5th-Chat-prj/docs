@@ -1,7 +1,7 @@
 # 10. ADR (Architecture Decision Records)
 
 > **형식**: 결정마다 1개
-> **버전**: v1.0
+> **버전**: v1.1 (ADR-008~011 추가 — 도전 기능 누락분 보완)
 
 ---
 
@@ -244,3 +244,269 @@ AccessToken 만료 전 즉시 무효화가 불가능하다. 로그아웃 시 Ref
 1. 예약 취소 후 재판매가 가능해야 함 → PRODUCT.status만 SALE로 되돌리고 새 TRADE 생성
 2. 거래 이력 보존 → 분쟁 대비, 리뷰 연결의 기준점
 3. 리뷰가 trade_id 기준으로 연결되어야 "이 거래의 구매자만 리뷰 작성 가능" 검증 가능
+
+---
+
+## ADR-008. Redis Cache-Aside 패턴 채택 (도전 기능)
+
+| 항목 | 내용 |
+|------|------|
+| **날짜** | 2025-06 |
+| **상태** | 승인됨 |
+| **대상** | 상품 상세 조회 캐싱 |
+
+### 컨텍스트
+
+상품 상세 페이지는 동일한 productId에 대해 반복 조회가 많다. DB 부하를 줄이기 위해 Redis 캐싱을 도입한다. 캐싱 전략을 결정해야 한다.
+
+### 비교
+
+| 전략 | 설명 | 장점 | 단점 |
+|------|------|------|------|
+| **Cache-Aside** | 앱이 캐시 미스 시 DB 조회 후 직접 캐시에 PUT | 필요한 데이터만 캐시 | 캐시 미스 첫 요청 느림 |
+| **Write-Through** | 쓰기 시 DB + 캐시 동시 갱신 | 캐시 항상 최신 | 모든 데이터가 캐시됨 (메모리 낭비) |
+| **Write-Behind** | 쓰기를 캐시에 먼저, DB는 비동기 | 쓰기 성능 최고 | 데이터 유실 위험, 구현 복잡 |
+
+### 결정
+
+**Cache-Aside (Lazy Loading)** 패턴 채택
+
+### 이유
+
+1. 중고거래 특성상 전체 상품 중 일부만 집중 조회됨 → 필요한 데이터만 캐시하는 Cache-Aside가 메모리 효율적
+2. Write-Through는 모든 상품 등록/수정 시 캐시를 항상 갱신해야 해서 불필요한 캐시 엔트리가 쌓임
+3. Write-Behind는 데이터 유실 위험이 있어 거래 데이터에 부적합
+
+### 구현 패턴
+
+```java
+// ProductService.java
+public ProductDetailResponse getProduct(Long productId) {
+    String cacheKey = "product:" + productId;
+
+    // 1. 캐시 조회
+    String cached = redisTemplate.opsForValue().get(cacheKey);
+    if (cached != null) {
+        return objectMapper.readValue(cached, ProductDetailResponse.class); // CACHE HIT
+    }
+
+    // 2. DB 조회 (CACHE MISS)
+    Product product = productRepository.findById(productId)
+        .orElseThrow(() -> new NotFoundException("상품을 찾을 수 없습니다."));
+    ProductDetailResponse response = ProductDetailResponse.from(product);
+
+    // 3. 캐시 저장 (TTL 10분)
+    redisTemplate.opsForValue().set(cacheKey, objectMapper.writeValueAsString(response),
+        Duration.ofMinutes(10));
+
+    return response; // CACHE MISS → DB 조회 후 캐시 저장
+}
+
+// 상품 수정/삭제 시 캐시 무효화
+public void updateProduct(Long productId, UpdateProductRequest request) {
+    // ... 상품 수정 로직 ...
+    redisTemplate.delete("product:" + productId); // Cache Eviction
+}
+```
+
+### TTL 정책
+
+| 캐시 대상 | TTL | 이유 |
+|-----------|-----|------|
+| 상품 상세 | 10분 | 상태 변경(예약/판매완료)이 빈번하지 않음, 수정 시 명시적 eviction |
+| 상품 목록 | 미적용 | 목록은 변화가 잦고 Cursor 조합이 무한해 캐싱 비효율 |
+
+### 트레이드오프
+
+캐시와 DB 사이 최대 10분의 불일치 가능성이 있다. 상품 수정·삭제·상태 변경 시 즉시 `redisTemplate.delete(key)`로 eviction하여 불일치 구간을 최소화한다.
+
+---
+
+## ADR-009. EXPLAIN 기반 인덱스 최적화 전략
+
+| 항목 | 내용 |
+|------|------|
+| **날짜** | 2025-06 |
+| **상태** | 승인됨 |
+| **대상** | MySQL 8 인덱스 설계 |
+
+### 컨텍스트
+
+처음부터 모든 컬럼에 인덱스를 걸면 되는 것 아닌가? 라는 질문에 답해야 한다. 인덱스 설계 전략을 결정해야 한다.
+
+### 왜 처음부터 모든 인덱스를 걸지 않는가?
+
+| 항목 | 설명 |
+|------|------|
+| 쓰기 성능 저하 | 인덱스가 많을수록 INSERT/UPDATE/DELETE 시 B-Tree 갱신 비용 증가 |
+| 불필요한 인덱스 | 실제 쿼리 패턴과 다른 인덱스는 옵티마이저 혼란, 메모리 낭비 |
+| 복합 인덱스 순서 | 컬럼 순서가 틀리면 인덱스를 전혀 타지 않음 |
+
+### 결정
+
+**실제 쿼리 작성 후 EXPLAIN으로 실행 계획 확인 → 필요한 인덱스만 추가** 전략 채택
+
+### EXPLAIN 분석 기준
+
+```sql
+-- 예시: 상품 검색 쿼리
+EXPLAIN SELECT * FROM product
+WHERE status = 'SALE' AND category_id = 12
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+| EXPLAIN 컬럼 | 확인 기준 | 나쁜 신호 |
+|-------------|-----------|-----------|
+| `type` | `ref`, `range`, `index` | `ALL` (풀 테이블 스캔) |
+| `key` | 인덱스명 표시 | `NULL` (인덱스 미사용) |
+| `rows` | 적을수록 좋음 | 전체 행 수에 근접 |
+| `Extra` | `Using index` | `Using filesort`, `Using temporary` |
+
+### 우선 최적화 대상 쿼리 목록
+
+| 쿼리 | 현재 인덱스 계획 | EXPLAIN 목표 |
+|------|----------------|-------------|
+| 상품 목록 (status + created_at) | `(status, created_at DESC)` | type=range, Using index |
+| 카테고리 검색 (category_id + status) | `(category_id, status)` | type=ref |
+| 제목 키워드 검색 | `FULLTEXT(title)` | type=fulltext (LIKE 대비 성능 대폭 향상) |
+| 채팅 이력 최신순 | `(chat_room_id, id DESC)` | type=ref, Using index |
+
+### FULLTEXT vs LIKE 비교
+
+| 항목 | `LIKE '%키워드%'` | `FULLTEXT` |
+|------|-----------------|------------|
+| 인덱스 사용 | ❌ 앞 와일드카드 시 풀스캔 | ✅ 역색인 사용 |
+| 성능 | 데이터 많을수록 급격히 저하 | 일정 수준 유지 |
+| 설정 | 없음 | `FULLTEXT INDEX` 생성 필요 |
+| 최소 토큰 길이 | 무관 | `innodb_ft_min_token_size=2` 설정 필요 (한글 2자) |
+
+```sql
+-- FULLTEXT 인덱스 생성
+ALTER TABLE product ADD FULLTEXT INDEX ft_title (title) WITH PARSER ngram;
+
+-- FULLTEXT 쿼리
+SELECT * FROM product WHERE MATCH(title) AGAINST('침대 프레임' IN BOOLEAN MODE);
+```
+
+### 트레이드오프
+
+FULLTEXT는 초기 설정(ngram parser, min_token_size)이 필요하다. 3주 일정 내 구현이 어려우면 `LIKE '키워드%'` (앞 와일드카드 제거)로 시작하고 FULLTEXT는 QA 주에 적용한다.
+
+---
+
+## ADR-010. WebSocket + STOMP 채택 (vs SSE, Long Polling)
+
+| 항목 | 내용 |
+|------|------|
+| **날짜** | 2025-06 |
+| **상태** | 승인됨 |
+| **대상** | 1:1 실시간 채팅 |
+
+### 컨텍스트
+
+구매자-판매자 간 실시간 채팅을 구현해야 한다. 실시간 통신 방식을 결정해야 한다.
+
+### 비교
+
+| 항목 | Long Polling | SSE | WebSocket + STOMP |
+|------|-------------|-----|-------------------|
+| 방향 | 단방향 (서버→클라이언트) | 단방향 (서버→클라이언트) | ✅ 양방향 |
+| 연결 방식 | HTTP 반복 요청 | HTTP 지속 연결 | TCP 지속 연결 |
+| 메시지 전송 | 클라이언트→서버: 별도 HTTP POST | 클라이언트→서버: 별도 HTTP POST | ✅ 단일 연결로 송수신 |
+| 서버 부하 | 높음 (반복 HTTP) | 낮음 | 낮음 |
+| 구현 복잡도 | 낮음 | 낮음 | 중간 |
+| 채팅 적합성 | 부적합 | 부적합 (단방향) | ✅ 적합 |
+| Spring 지원 | ✅ | ✅ | ✅ `spring-websocket` |
+
+### 결정
+
+**WebSocket + STOMP** 채택
+
+### 이유
+
+1. 채팅은 본질적으로 **양방향** 통신 — SSE는 서버→클라이언트 단방향만 지원하므로 메시지 전송에 별도 HTTP POST가 필요해 구조가 복잡해짐
+2. Long Polling은 메시지마다 새 HTTP 연결을 맺어 불필요한 오버헤드 발생
+3. STOMP 프로토콜은 발행/구독(pub/sub) 패턴을 추상화하여 채팅방 라우팅 구현이 간결함
+4. `spring-websocket` + `spring-messaging` 의존성만으로 구현 가능
+
+### STOMP 선택 이유 (순수 WebSocket 대비)
+
+```
+순수 WebSocket:
+  - 텍스트 프레임을 직접 처리해야 함
+  - 채팅방 라우팅, 브로드캐스트 로직을 직접 구현
+
+STOMP over WebSocket:
+  - SUBSCRIBE /topic/room.{id} → 자동 라우팅
+  - SEND /app/chat.sendMessage → @MessageMapping으로 수신
+  - SimpleBroker가 구독자 관리 자동화
+```
+
+### 트레이드오프
+
+WebSocket은 HTTP/2 멀티플렉싱과 달리 연결당 하나의 소켓을 유지한다. 동시 접속자가 수천 명이 되면 서버 소켓 리소스가 문제될 수 있다. 현재 규모(수십~수백 명)에서는 문제없으며, 스케일 필요 시 STOMP External Broker(RabbitMQ/Redis)로 전환한다.
+
+---
+
+## ADR-011. GitHub Actions + ECR + EC2 SSH 배포 자동화
+
+| 항목 | 내용 |
+|------|------|
+| **날짜** | 2025-06 |
+| **상태** | 승인됨 |
+| **대상** | CI/CD 파이프라인 |
+
+### 컨텍스트
+
+코드 변경 → 프로덕션 반영까지의 배포 파이프라인을 자동화해야 한다. AWS 배포 방식을 결정해야 한다.
+
+### 비교
+
+| 항목 | GitHub Actions + SSH | AWS CodeDeploy | ECS (Fargate) |
+|------|---------------------|---------------|---------------|
+| 설정 복잡도 | 낮음 | 중간 | 높음 |
+| 비용 | Actions 무료(공개) / EC2 비용만 | CodeDeploy 무료 + EC2 | Fargate 태스크 비용 추가 |
+| Blue/Green 배포 | ❌ 수동 구성 필요 | ✅ 내장 | ✅ 내장 |
+| 경력 3개월 팀 적합성 | ✅ 높음 | 중간 | 낮음 |
+| 학습 목적 | ✅ 전체 흐름 이해에 적합 | 블랙박스 많음 | 블랙박스 많음 |
+
+### 결정
+
+**GitHub Actions + ECR + EC2 SSH 방식** 채택
+
+### 이유
+
+1. **학습 목적에 최적**: 빌드 → 이미지 빌드 → ECR push → EC2 pull → 컨테이너 재시작의 전 흐름을 직접 작성하므로 CI/CD 전체를 이해할 수 있음
+2. **추가 서비스 비용 없음**: CodeDeploy agent 설정, ECS 추가 비용 불필요
+3. **3주 일정에 적합**: GitHub Actions YAML은 공식 문서와 예시가 풍부해 빠르게 구현 가능
+
+### 왜 Blue/Green을 적용하지 않는가?
+
+```
+Blue/Green 미적용 이유:
+  - 단일 EC2 인스턴스 환경에서 Blue/Green은 서버 2대 필요
+  - 3주 프로젝트에서 다운타임 1~2분은 허용 범위
+  - docker-compose down → up 방식으로 재시작 시간 최소화
+
+향후 확장 시:
+  - ALB(Application Load Balancer) + Auto Scaling Group + CodeDeploy로 전환
+  - 또는 ECS Fargate + ECR + CodePipeline으로 전환
+```
+
+### 배포 단계별 Secrets 관리
+
+| Secret 키 | 용도 | 저장 위치 |
+|-----------|------|-----------|
+| `AWS_ACCESS_KEY_ID` | ECR 로그인, EC2 접근 | GitHub Secrets |
+| `AWS_SECRET_ACCESS_KEY` | 위와 동일 | GitHub Secrets |
+| `EC2_HOST` | SSH 접속 IP | GitHub Secrets |
+| `EC2_SSH_KEY` | PEM 키 내용 | GitHub Secrets |
+| `DB_PASSWORD` | RDS 비밀번호 | EC2 `.env` 파일 또는 AWS Secrets Manager |
+| `JWT_SECRET` | JWT 서명 키 | EC2 `.env` 파일 또는 AWS Secrets Manager |
+
+> **보안 원칙**: DB 비밀번호, JWT 시크릿은 GitHub Secrets에 저장하지 않는다. EC2 인스턴스의 `.env` 파일에만 저장하고 GitHub Actions는 SSH로 `docker-compose up`만 실행한다.
+
+### 트레이드오프
+
+SSH 방식은 EC2가 재기동되면 IP가 바뀔 수 있다. 반드시 **Elastic IP**를 EC2에 연결하여 고정 IP를 사용해야 한다. 또한 SSH 포트(22)는 GitHub Actions IP 대역이 아닌 개발자 고정 IP만 허용하는 것이 원칙이나, GitHub Actions의 IP는 동적이므로 `appleboy/ssh-action`을 쓸 때는 일시적으로 22포트를 열어두거나 AWS Systems Manager Session Manager로 대체하는 것을 권장한다.

@@ -1,6 +1,6 @@
 # 06. API 명세서
 
-> **버전**: v1.0
+> **버전**: v1.1 (에러 응답 상세화, PRODUCT_IMAGE 정책 명시, 신규 에러 코드 추가)
 > **Base URL**: `https://api.marketplace.com/api/v1`
 > **인증**: `Authorization: Bearer {AccessToken}` (🔒 표시 API)
 
@@ -126,6 +126,18 @@
 }
 ```
 
+**Response 401** (비밀번호 불일치):
+```json
+{ "code": "INVALID_CREDENTIALS", "message": "이메일 또는 비밀번호가 올바르지 않습니다." }
+```
+
+**Response 404** (존재하지 않는 이메일):
+```json
+{ "code": "MEMBER_NOT_FOUND", "message": "존재하지 않는 계정입니다." }
+```
+
+> **보안 참고**: 이메일 존재 여부를 노출하지 않으려면 401로 통일하는 방법도 있다. 사용자 편의를 위해 현재는 구분해서 반환한다.
+
 ---
 
 ### GET /products?cursor=&size=20
@@ -191,6 +203,28 @@
 { "id": 42, "title": "침대 프레임 퀸사이즈", "status": "SALE" }
 ```
 
+**Response 400** (유효성 오류):
+```json
+{
+  "code": "INVALID_REQUEST",
+  "message": "입력값이 올바르지 않습니다.",
+  "errors": [
+    { "field": "title", "message": "제목은 2자 이상 40자 이하여야 합니다." },
+    { "field": "price", "message": "가격은 100원 이상이어야 합니다." }
+  ]
+}
+```
+
+**Response 401** (미인증):
+```json
+{ "code": "UNAUTHORIZED", "message": "로그인이 필요합니다." }
+```
+
+**이미지 수정 정책** (`PATCH /products/{productId}` 연동):
+- `imageUrls` 배열을 전달하면 **전체 교체** 방식으로 처리 (기존 PRODUCT_IMAGE 전체 삭제 후 재등록)
+- `imageUrls` 필드 미전달 시 이미지 변경 없음
+- 이미지 개별 삭제·순서 변경 API는 Out of Scope (향후 확장)
+
 ---
 
 ### POST /products/{productId}/reserve (예약 요청 ⭐)
@@ -207,9 +241,28 @@
 }
 ```
 
+**Response 400** (본인 상품 예약 시도):
+```json
+{ "code": "SELF_RESERVATION", "message": "본인의 상품은 예약할 수 없습니다." }
+```
+
+**Response 401** (미인증):
+```json
+{ "code": "UNAUTHORIZED", "message": "로그인이 필요합니다." }
+```
+
+**Response 404** (상품 없음):
+```json
+{ "code": "PRODUCT_NOT_FOUND", "message": "존재하지 않는 상품입니다." }
+```
+
 **Response 409** (이미 예약됨):
 ```json
-{ "code": "ALREADY_RESERVED", "message": "이미 예약된 상품입니다." }
+{
+  "code": "ALREADY_RESERVED",
+  "message": "이미 예약된 상품입니다. 잠시 후 다시 확인해보세요.",
+  "retryAfter": 1
+}
 ```
 
 ---
@@ -228,6 +281,21 @@
 **Response 200**:
 ```json
 { "tradeId": 99, "status": "TRADING" }
+```
+
+**Response 400** (허용되지 않는 상태 전이):
+```json
+{ "code": "INVALID_STATUS_TRANSITION", "message": "현재 상태에서는 해당 전이가 불가능합니다." }
+```
+
+**Response 403** (권한 없음 — 타인 거래 변경 시도):
+```json
+{ "code": "FORBIDDEN", "message": "해당 거래에 대한 권한이 없습니다." }
+```
+
+**Response 404** (거래 없음):
+```json
+{ "code": "TRADE_NOT_FOUND", "message": "존재하지 않는 거래입니다." }
 ```
 
 ---
@@ -257,11 +325,19 @@
 | HTTP Status | Code | 설명 |
 |-------------|------|------|
 | 400 | INVALID_REQUEST | 요청 값 유효성 오류 |
+| 400 | INVALID_STATUS_TRANSITION | 허용되지 않는 거래 상태 전이 |
+| 400 | SELF_RESERVATION | 본인 상품 예약 시도 |
+| 400 | DUPLICATE_RESERVATION | 동일 사용자 중복 예약 시도 |
 | 401 | UNAUTHORIZED | 인증 실패 / 토큰 만료 |
-| 403 | FORBIDDEN | 권한 없음 (타인 리소스) |
+| 401 | INVALID_CREDENTIALS | 이메일 또는 비밀번호 불일치 |
+| 403 | FORBIDDEN | 권한 없음 (타인 리소스 접근) |
 | 404 | NOT_FOUND | 리소스 없음 |
+| 404 | MEMBER_NOT_FOUND | 존재하지 않는 회원 |
+| 404 | PRODUCT_NOT_FOUND | 존재하지 않는 상품 |
+| 404 | TRADE_NOT_FOUND | 존재하지 않는 거래 |
 | 409 | DUPLICATE_EMAIL | 이메일 중복 |
 | 409 | ALREADY_RESERVED | 이미 예약된 상품 |
+| 409 | LOCK_TIMEOUT | 락 대기 타임아웃 (잠시 후 재시도 안내) |
 | 500 | INTERNAL_ERROR | 서버 오류 |
 
 ---

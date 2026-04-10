@@ -1,6 +1,6 @@
 # 06. API 명세서
 
-> **버전**: v1.2 (채팅방 생성 API 추가, 에러코드 통일, retryAfter 정책 명시)
+> **버전**: v1.3 (채팅방 생성 API 추가, 에러코드 통일, retryAfter 정책 명시, WebSocket JWT 정책/채팅 페이지네이션 보완)
 > **Base URL**: `https://api.marketplace.com/api/v1`
 > **인증**: `Authorization: Bearer {AccessToken}` (🔒 표시 API)
 
@@ -147,7 +147,7 @@
 |----------|------|------|------|
 | cursor | String | ❌ | 마지막 항목의 커서값 (없으면 첫 페이지) |
 | size | Integer | ❌ | 기본값 20, 최대 50 |
-| status | String | ❌ | SALE(기본), RESERVED, SOLD, ALL |
+| status | String | ❌ | SALE(기본), RESERVED, TRADING, SOLD, REVIEWED, ALL |
 
 **Response 200**:
 ```json
@@ -288,7 +288,7 @@
 
 **Response 403** (권한 없음 — 타인 거래 변경 시도):
 ```json
-{ "code": "FORBIDDEN", "message": "해당 거래에 대한 권한이 없습니다." }
+{ "code": "TRADE_FORBIDDEN", "message": "해당 거래에 대한 권한이 없습니다." }
 ```
 
 **Response 404** (거래 없음):
@@ -307,13 +307,17 @@
   "productId": 42,
   "buyerId": 10,
   "sellerId": 5,
-  "status": "RESERVED"
+  "status": "RESERVED",
+  "productStatus": "RESERVED",
+  "reservedAt": "2025-06-01T10:00:00",
+  "tradedAt": null,
+  "soldAt": null
 }
 ```
 
 **Response 403** (거래 당사자 아님):
 ```json
-{ "code": "FORBIDDEN", "message": "해당 거래에 대한 권한이 없습니다." }
+{ "code": "TRADE_FORBIDDEN", "message": "해당 거래에 대한 권한이 없습니다." }
 ```
 
 **Response 404**:
@@ -406,6 +410,51 @@
 
 ---
 
+### GET /chat-rooms/{chatRoomId}/messages
+
+**Query Parameters**:
+
+| 파라미터 | 타입 | 필수 | 설명 |
+|----------|------|------|------|
+| cursor | Long | ❌ | 마지막으로 내려준 `messageId` (없으면 최신부터) |
+| size | Integer | ❌ | 기본값 30, 최대 100 |
+
+**Response 200**:
+```json
+{
+  "content": [
+    {
+      "messageId": 1003,
+      "chatRoomId": 55,
+      "senderId": 7,
+      "content": "네, 아직 있습니다.",
+      "createdAt": "2025-06-01T10:06:00"
+    },
+    {
+      "messageId": 1002,
+      "chatRoomId": 55,
+      "senderId": 5,
+      "content": "네, 판매 중입니다 :)",
+      "createdAt": "2025-06-01T10:05:30"
+    }
+  ],
+  "nextCursor": 1002,
+  "hasNext": true
+}
+```
+
+**Response 403** (채팅방 참여자 아님):
+```json
+{ "code": "CHAT_FORBIDDEN", "message": "해당 채팅방에 대한 권한이 없습니다." }
+```
+
+**Response 404** (채팅방 없음):
+```json
+{ "code": "CHAT_ROOM_NOT_FOUND", "message": "존재하지 않는 채팅방입니다." }
+```
+
+---
+
 ### GET /search/popular
 
 **Response 200** (Caffeine 캐시, TTL 10분):
@@ -436,7 +485,7 @@
 | 400 | SELF_CHAT | 본인 상품에 채팅 시도 |
 | 401 | UNAUTHORIZED | 인증 실패 / 토큰 만료 |
 | 401 | INVALID_CREDENTIALS | 이메일 또는 비밀번호 불일치 |
-| 403 | FORBIDDEN | 권한 없음 (타인 리소스 접근) |
+| 403 | TRADE_FORBIDDEN / CHAT_FORBIDDEN / PRODUCT_FORBIDDEN | 도메인별 권한 없음 |
 | 404 | NOT_FOUND | 리소스 없음 |
 | 404 | MEMBER_NOT_FOUND | 존재하지 않는 회원 |
 | 404 | PRODUCT_NOT_FOUND | 존재하지 않는 상품 |
@@ -472,10 +521,12 @@
 ### 연결
 
 ```
-ws://api.marketplace.com/ws-chat
+wss://api.marketplace.com/ws-chat
 STOMP CONNECT headers:
   Authorization: Bearer {AccessToken}
 ```
+
+> **JWT 정책**: WebSocket은 STOMP CONNECT 시점에만 JWT를 검증한다. 연결이 수립된 뒤 AccessToken이 만료되어도 기존 세션은 유지되며, 이후 메시지 처리에서는 채팅방 참여자 여부만 확인한다. 재연결 시에는 최신 AccessToken으로 다시 CONNECT 해야 한다.
 
 ### 구독
 

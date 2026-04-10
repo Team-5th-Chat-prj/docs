@@ -1,6 +1,6 @@
 # 05. ERD (Entity Relationship Diagram)
 
-> **버전**: v1.1
+> **버전**: v1.2
 > **표기법**: Mermaid ERD
 >
 > **개념 정의**: `PRODUCT` = 중고 판매글(Listing). 카탈로그 상품이 아님. 판매자가 올린 "이 물건을 팝니다" 게시글 1건 = PRODUCT 1건.
@@ -203,11 +203,13 @@ if (hasActiveTrade) throw new ConflictException("ALREADY_RESERVED", ...);
 - PRODUCT 테이블에 `like_count` 컬럼을 두어 목록 조회 시 JOIN 없이 찜 수 표시
 - 정합성 허용 오차 ±1 수준 (실시간 정확도 불필요)
 - 증가: `UPDATE product SET like_count = like_count + 1 WHERE id = ?`
+- **구현 정책**: `ProductRepository.incrementLikeCount()` / `decrementLikeCount()` 형태의 **JPQL 벌크 업데이트** 사용. JPA dirty checking으로 엔티티를 읽어 수정하면 lost update 위험이 있으므로 금지
 
 ### 2-5-1. MEMBER.review_count 비정규화
 
 - MEMBER 테이블에 `review_count` 컬럼을 두어 마이페이지 조회 시 COUNT 쿼리 불필요
 - `average_rating`과 동일한 패턴: 리뷰 작성 시 단일 트랜잭션 내에서 함께 UPDATE
+- `review_count`, `average_rating`도 목록/프로필 정합성을 위해 JPQL 벌크 UPDATE 또는 원자적 UPDATE SQL 패턴으로 통일
 - 수정/삭제 불가 정책이므로 감소 로직 불필요
 
 ---
@@ -231,8 +233,9 @@ if (hasActiveTrade) throw new ConflictException("ALREADY_RESERVED", ...);
 
 ### 2-8. KEYWORD_LOG 설계
 
-- 검색 요청마다 `(keyword, log_date)` 조합으로 **INSERT 또는 count +1 UPDATE** (upsert 방식)
-- 스케줄러가 10분마다 최근 7일 집계 → TOP 10 인기 검색어 Caffeine 캐시 갱신
+- 검색 요청마다 `KEYWORD_LOG`에 **순수 INSERT 방식**으로 1건 적재 (`count = 1`)
+- 스케줄러가 10분마다 최근 7일 데이터를 `SUM(count) GROUP BY keyword`로 집계 → TOP 10 인기 검색어 Caffeine 캐시 갱신
+- 동시 검색 상황에서도 upsert 충돌 없이 append-only 로그처럼 안전하게 적재 가능
 - `log_date` 컬럼으로 7일 이전 데이터 주기적 삭제 가능
 
 ---
@@ -249,5 +252,6 @@ if (hasActiveTrade) throw new ConflictException("ALREADY_RESERVED", ...);
 | TRADE | `(buyer_id)` | 구매 이력 조회 |
 | LIKE | `UNIQUE(member_id, product_id)` | 중복 방지 + 찜 여부 조회 |
 | CHAT_ROOM | `UNIQUE(buyer_id, product_id)` | 동일 채팅방 중복 생성 방지 |
+| CHAT_ROOM | `(seller_id)` | 판매자 기준 채팅방 목록 조회 최적화 |
 | CHAT_MESSAGE | `(chat_room_id, id DESC)` | 채팅 이력 최신순 |
 | KEYWORD_LOG | `(keyword, log_date)` | 인기 검색어 집계 |

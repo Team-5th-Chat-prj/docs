@@ -17,6 +17,7 @@ erDiagram
         varchar password
         varchar nickname
         float average_rating
+        int review_count
         datetime created_at
         datetime updated_at
         boolean is_deleted
@@ -24,9 +25,7 @@ erDiagram
 
     CATEGORY {
         bigint id PK
-        bigint parent_id FK
         varchar name
-        int depth
     }
 
     PRODUCT {
@@ -113,7 +112,6 @@ erDiagram
     MEMBER ||--o{ CHAT_ROOM : seller_rooms
     MEMBER ||--o{ CHAT_MESSAGE : sends
 
-    CATEGORY ||--o{ CATEGORY : parent_of
     CATEGORY ||--o{ PRODUCT : classifies
 
     PRODUCT ||--o{ PRODUCT_IMAGE : has
@@ -206,14 +204,20 @@ if (hasActiveTrade) throw new ConflictException("ALREADY_RESERVED", ...);
 - 정합성 허용 오차 ±1 수준 (실시간 정확도 불필요)
 - 증가: `UPDATE product SET like_count = like_count + 1 WHERE id = ?`
 
+### 2-5-1. MEMBER.review_count 비정규화
+
+- MEMBER 테이블에 `review_count` 컬럼을 두어 마이페이지 조회 시 COUNT 쿼리 불필요
+- `average_rating`과 동일한 패턴: 리뷰 작성 시 단일 트랜잭션 내에서 함께 UPDATE
+- 수정/삭제 불가 정책이므로 감소 로직 불필요
+
 ---
 
-### 2-6. CATEGORY 자기 참조 (2뎁스)
+### 2-6. CATEGORY 단층(Flat) 구조
 
-- `parent_id IS NULL` → 대분류
-- `parent_id IS NOT NULL` → 소분류
-- PRODUCT는 소분류 ID만 저장 (depth=1)
-- 대분류 조회 필요 시 JOIN 또는 `parent_id`를 통해 역추적
+- 대분류/소분류 계층 없이 단일 카테고리 목록으로 구성
+- `parent_id`, `depth` 컬럼 없음 — 자기 참조 관계 없음
+- PRODUCT는 단일 `category_id`만 참조
+- 3주 일정 내 계층 탐색 구현 복잡도를 제거하기 위한 결정
 
 ---
 
@@ -227,8 +231,9 @@ if (hasActiveTrade) throw new ConflictException("ALREADY_RESERVED", ...);
 
 ### 2-8. KEYWORD_LOG 설계
 
-- 검색마다 실시간 INSERT 대신 `count` 컬럼 UPDATE 또는 일배치 집계
-- `log_date` 컬럼으로 최근 7일 집계 → 인기 검색어 산출
+- 검색 요청마다 `(keyword, log_date)` 조합으로 **INSERT 또는 count +1 UPDATE** (upsert 방식)
+- 스케줄러가 10분마다 최근 7일 집계 → TOP 10 인기 검색어 Caffeine 캐시 갱신
+- `log_date` 컬럼으로 7일 이전 데이터 주기적 삭제 가능
 
 ---
 

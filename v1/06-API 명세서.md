@@ -14,7 +14,6 @@
 |--------|-----|------|------|
 | POST | `/auth/signup` | 회원가입 | ❌ |
 | POST | `/auth/login` | 로그인 | ❌ |
-| POST | `/auth/reissue` | 토큰 재발급 | ❌ |
 | POST | `/auth/logout` | 로그아웃 | 🔒 |
 
 ### 회원 API
@@ -121,7 +120,6 @@
 ```json
 {
   "accessToken": "eyJ...",
-  "refreshToken": "550e8400-e29b-41d4-a716-...",
   "tokenType": "Bearer",
   "expiresIn": 900
 }
@@ -237,8 +235,7 @@
 {
   "tradeId": 99,
   "productId": 42,
-  "status": "RESERVED",
-  "chatRoomId": 55
+  "status": "RESERVED"
 }
 ```
 
@@ -297,6 +294,80 @@
 **Response 404** (거래 없음):
 ```json
 { "code": "TRADE_NOT_FOUND", "message": "존재하지 않는 거래입니다." }
+```
+
+---
+
+### GET /trades/{tradeId} (거래 상세 조회)
+
+**Response 200**:
+```json
+{
+  "tradeId": 99,
+  "productId": 42,
+  "buyerId": 10,
+  "sellerId": 5,
+  "status": "RESERVED"
+}
+```
+
+**Response 403** (거래 당사자 아님):
+```json
+{ "code": "FORBIDDEN", "message": "해당 거래에 대한 권한이 없습니다." }
+```
+
+**Response 404**:
+```json
+{ "code": "TRADE_NOT_FOUND", "message": "존재하지 않는 거래입니다." }
+```
+
+---
+
+### GET /members/{memberId}/reviews (회원 리뷰 목록)
+
+**Response 200**:
+```json
+{
+  "reviews": [
+    {
+      "id": 1,
+      "rating": 4,
+      "content": "친절하게 거래해주셨어요.",
+      "reviewerNickname": "이서연",
+      "createdAt": "2025-06-01T14:00:00"
+    }
+  ],
+  "averageRating": 4.8,
+  "totalCount": 23
+}
+```
+
+**Response 404** (존재하지 않는 회원):
+```json
+{ "code": "MEMBER_NOT_FOUND", "message": "존재하지 않는 회원입니다." }
+```
+
+---
+
+### PATCH /members/me (내 프로필 수정)
+
+**Request Body**:
+```json
+{ "nickname": "새닉네임" }
+```
+
+**Response 200**:
+```json
+{
+  "id": 1,
+  "email": "user@example.com",
+  "nickname": "새닉네임"
+}
+```
+
+**Response 400** (유효성 오류):
+```json
+{ "code": "INVALID_REQUEST", "message": "닉네임은 2~20자여야 합니다." }
 ```
 
 ---
@@ -497,8 +568,6 @@ paths:
                 type: object
                 properties:
                   accessToken:
-                    type: string
-                  refreshToken:
                     type: string
                   tokenType:
                     type: string
